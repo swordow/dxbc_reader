@@ -200,6 +200,7 @@ impl SwizzlesMask
 #[derive(Debug)]
 struct VarOperand
 {
+    pub Neg:        bool,
     pub Name:       std::string::String,
     pub NameDim:    Option<u32>,
     pub Dim:        Option<u32>,
@@ -265,10 +266,11 @@ impl std::string::ToString for VarOperand
 
 impl VarOperand
 {
-    fn new(name:&str, nameDim:Option<u32>, dim:Option<u32>, swizzles:&str)->VarOperand
+    fn new(neg:bool, name:&str, nameDim:Option<u32>, dim:Option<u32>, swizzles:&str)->VarOperand
     {
         VarOperand
         {
+            Neg         : neg,
             Name        : name.to_string(),
             NameDim     : nameDim,
             Dim         : dim,
@@ -531,14 +533,14 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
     let pattern = RegexBuilder::new(
         r#"(?x)
                 (
-                    [+-]?[_A-Za-z]+[0-9]*
+                    [-]?[_A-Za-z]+[0-9]*
                 )
                 [\t\ ]+
                 (?:
                     [\t\ ]*
                     (
                         (
-                            [+-]?[_A-Za-z]+[0-9]*               # operand name
+                            [-]?[_A-Za-z]+[0-9]*               # operand name
                             (?:
                                 \[[0-9]+\]                      # dim
                             )?
@@ -550,7 +552,7 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
                         |
                         ([\|]
                                 (                               #
-                                    [+-]?[_A-Za-z]+[0-9]*       # operand name
+                                    [-]?[_A-Za-z]+[0-9]*       # operand name
                                     (?:
                                         \[[0-9]+\]              # dim
                                     )?
@@ -562,7 +564,7 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
                         [\|])
                         |
                         (
-                            [+-]?[_A-Za-z]+[0-9]*               # constant operand name
+                            [-]?[_A-Za-z]+[0-9]*               # constant operand name
                             \(
                                 [+-]?[0-9]+
                                 (?:
@@ -572,7 +574,7 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
                                     [\t\ ]*
                                     ,
                                     [\t\ ]*
-                                    [+-]?[0-9]+
+                                    [-]?[0-9]+
                                     (?:
                                         \.[0-9]+
                                     )?
@@ -630,9 +632,10 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
     let varOperandPattern = Regex::new(
         r#"(?x)
             [\t\ ]*
+            (?P<Neg> -)?
             (?P<PreAbs>\|)?
             (?P<VarName>
-                [+-]?[_A-Za-z]+             # operand name
+                [_A-Za-z]+             # operand name
             )
             (?P<VarNameDim>
                 [0-9]+                      # operand name dim
@@ -663,14 +666,14 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
         r#"(?x)
                     [\t\ ]*
                     (?P<ConstName>
-                        [+-]?[_A-Za-z]+             # operand name
+                        [_A-Za-z]+             # operand name
                     )
                     (?P<ConstNameDim>
                         [0-9]+                      # operand name dim
                     )?
                     \(
                         (?P<ConstInitList>
-                            [+-]?[0-9]+
+                            [-]?[0-9]+
                             (?:
                                 \.[0-9]+
                             )?
@@ -678,7 +681,7 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
                                 [\t\ ]*
                                 ,
                                 [\t\ ]*
-                                [+-]?[0-9]+
+                                [-]?[0-9]+
                                 (?:
                                     \.[0-9]+
                                 )?
@@ -706,6 +709,7 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
     //     post = Some("_sat".to_string());
     //     name = name.trim_end_matches("_sat");
     // }
+
     if let Some(postsMatch) = opcaps.name("Posts")
     {
         let pstr = postsMatch.as_str();
@@ -742,6 +746,14 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
             let mut varNameDim:Option<u32> = None;
             let mut varDim:Option<u32> = None;
             let mut varSwizzles = "";
+            let mut neg = false;
+            if let Some(negStr) = caps.name("Neg")
+            {
+                if (negStr.as_str() == "-")
+                {
+                    neg = true;
+                }
+            }
             if let Some(m) = caps.name("VarName")
             {
                 varName = m.as_str();
@@ -758,7 +770,7 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
             {
                 varSwizzles = m.as_str();
             };
-            let varOperand = VarOperand::new(varName, varNameDim, varDim, varSwizzles);
+            let varOperand = VarOperand::new(neg,varName, varNameDim, varDim, varSwizzles);
             //println!("{:?}", varOperand);
             start = start + fnd.as_ref().unwrap().end();
             inst.0.push(InstructionComponent::VarOperand(varOperand));
@@ -1145,7 +1157,7 @@ impl DXBCParser
                 }
             }
 
-            output.push_str(&format!("{}{}.{}", symName, &var.dim_name(), outputMask.to_string()));
+            output.push_str(&format!("{}{}{}.{}", if var.Neg {"-"} else {""}, symName, &var.dim_name(), outputMask.to_string()));
         } else if let InstructionComponent::ConstantOperand(constant) = inst
         {
             output.push_str(&format!("{}", constant.output(mask)));
