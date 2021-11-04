@@ -10,6 +10,7 @@ use std::borrow::BorrowMut;
 use std::env;
 use std::io::{BufRead};
 use std::num::ParseIntError;
+use std::ops::Index;
 use std::str::FromStr;
 use std::vec::Vec;
 use regex::{Match, Regex, RegexBuilder};
@@ -27,6 +28,10 @@ enum InstructionItem
     Inst_min,
     Inst_max,
     Inst_mov,
+    Inst_movc,
+    Inst_lt,
+    Inst_ne,
+    Inst_div,
     Inst_mad,
     Inst_mul,
     Inst_exp,
@@ -48,13 +53,17 @@ impl core::str::FromStr for InstructionItem
         {
             "dp"    => {Ok(InstructionItem::Inst_dp(0))},
             "add"   => {Ok(InstructionItem::Inst_add)},
-            "and"   => {Ok(InstructionItem::Inst_break)},
+            "and"   => {Ok(InstructionItem::Inst_and)},
             "break" => {Ok(InstructionItem::Inst_break)},
             "itof"  => {Ok(InstructionItem::Inst_itof)},
             "loop"  => {Ok(InstructionItem::Inst_loop)},
             "min"   => {Ok(InstructionItem::Inst_min)},
             "max"   => {Ok(InstructionItem::Inst_max)},
             "mov"   => {Ok(InstructionItem::Inst_mov)},
+            "movc"   => {Ok(InstructionItem::Inst_movc)},
+            "lt"   => {Ok(InstructionItem::Inst_lt)},
+            "div"   => {Ok(InstructionItem::Inst_div)},
+            "ne"   => {Ok(InstructionItem::Inst_ne)},
             "mad"   => {Ok(InstructionItem::Inst_mad)},
             "mul"   => {Ok(InstructionItem::Inst_mul)},
             "exp"   => {Ok(InstructionItem::Inst_exp)},
@@ -75,18 +84,18 @@ struct OpCode
 {
     pub Name        :   std::string::String,
     pub Dim         :   Option<u32>,
-    pub Post        :   Option<std::string::String>,
+    pub Posts       :   Vec<std::string::String>,
     pub InstItem    :   InstructionItem
 }
 
 impl OpCode
 {
-    fn new(name:&str, post:Option<String>, dim:Option<u32>)->OpCode
+    fn new(name:&str, posts:Vec<String>, dim:Option<u32>)->OpCode
     {
         OpCode{
             Name        : name.to_string(),
             Dim         : dim,
-            Post        : post,
+            Posts       : posts,
             InstItem    : name.parse::<InstructionItem>().unwrap()
         }
     }
@@ -199,10 +208,13 @@ impl SwizzlesMask
 #[derive(Debug)]
 struct VarOperand
 {
+    pub Neg:        bool,
     pub Name:       std::string::String,
     pub NameDim:    Option<u32>,
     pub Dim:        Option<u32>,
-    pub Swizzles:   SwizzlesMask
+    pub Swizzles:   SwizzlesMask,
+    pub IsSampler:  bool,
+    pub IsTexture:  bool,
 }
 
 impl  core::str::FromStr for SwizzlesMask
@@ -264,14 +276,17 @@ impl std::string::ToString for VarOperand
 
 impl VarOperand
 {
-    fn new(name:&str, nameDim:Option<u32>, dim:Option<u32>, swizzles:&str)->VarOperand
+    fn new(neg:bool, name:&str, nameDim:Option<u32>, dim:Option<u32>, swizzles:&str)->VarOperand
     {
         VarOperand
         {
+            Neg         : neg,
             Name        : name.to_string(),
             NameDim     : nameDim,
             Dim         : dim,
-            Swizzles    : swizzles.parse::<SwizzlesMask>().unwrap()
+            Swizzles    : swizzles.parse::<SwizzlesMask>().unwrap(),
+            IsSampler   : if name == "s" && nameDim.is_some() && swizzles=="" {true} else {false},
+            IsTexture   : if name == "t" && nameDim.is_some() {true} else {false}
         }
     }
 
@@ -333,6 +348,10 @@ impl VarOperand
     fn get_swizzles(&self, mask:&SwizzlesMask)->SwizzlesMask
     {
         //println!("{:?}", mask);
+        if self.IsSampler
+        {
+            return self.Swizzles.clone();
+        }
         if mask.get_effective_len() == 1
         {
             return self.Swizzles.clone();
@@ -530,14 +549,14 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
     let pattern = RegexBuilder::new(
         r#"(?x)
                 (
-                    [+-]?[_A-Za-z]+[0-9]*
+                    [-]?[_A-Za-z]+[0-9]*
                 )
                 [\t\ ]+
                 (?:
                     [\t\ ]*
                     (
                         (
-                            [+-]?[_A-Za-z]+[0-9]*               # operand name
+                            [-]?[_A-Za-z]+[0-9]*               # operand name
                             (?:
                                 \[[0-9]+\]                      # dim
                             )?
@@ -547,9 +566,10 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
                             )?
                         )
                         |
-                        ([\|]
+                        ([-]?
+                            [\|]
                                 (                               #
-                                    [+-]?[_A-Za-z]+[0-9]*       # operand name
+                                    [_A-Za-z]+[0-9]*       # operand name
                                     (?:
                                         \[[0-9]+\]              # dim
                                     )?
@@ -558,10 +578,11 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
                                         [xyzw]{1,5}             # xyzw
                                     )
                                 )
-                        [\|])
+                            [\|]
+                        )
                         |
                         (
-                            [+-]?[_A-Za-z]+[0-9]*               # constant operand name
+                            [-]?[_A-Za-z]+[0-9]*               # constant operand name
                             \(
                                 [+-]?[0-9]+
                                 (?:
@@ -571,7 +592,7 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
                                     [\t\ ]*
                                     ,
                                     [\t\ ]*
-                                    [+-]?[0-9]+
+                                    [-]?[0-9]+
                                     (?:
                                         \.[0-9]+
                                     )?
@@ -615,10 +636,13 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
     let opcodePattern = Regex::new(
         r#"(?x)
                (?P<OpCode>
-                    [_A-Za-z]+
+                    [A-Za-z]+
                )
                (?P<Dim>
                     [0-9]+
+               )?
+               (?P<Posts>
+                    [_A-Za-z]+
                )?
                [\t\ ]+
             "#).unwrap();
@@ -626,9 +650,10 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
     let varOperandPattern = Regex::new(
         r#"(?x)
             [\t\ ]*
+            (?P<Neg> -)?
             (?P<PreAbs>\|)?
             (?P<VarName>
-                [+-]?[_A-Za-z]+             # operand name
+                [_A-Za-z]+             # operand name
             )
             (?P<VarNameDim>
                 [0-9]+                      # operand name dim
@@ -659,14 +684,14 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
         r#"(?x)
                     [\t\ ]*
                     (?P<ConstName>
-                        [+-]?[_A-Za-z]+             # operand name
+                        [_A-Za-z]+             # operand name
                     )
                     (?P<ConstNameDim>
                         [0-9]+                      # operand name dim
                     )?
                     \(
                         (?P<ConstInitList>
-                            [+-]?[0-9]+
+                            [-]?[0-9]+
                             (?:
                                 \.[0-9]+
                             )?
@@ -674,7 +699,7 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
                                 [\t\ ]*
                                 ,
                                 [\t\ ]*
-                                [+-]?[0-9]+
+                                [-]?[0-9]+
                                 (?:
                                     \.[0-9]+
                                 )?
@@ -696,15 +721,26 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
    
     let opcaps = opcodePattern.captures(&line[fnd.start()..fnd.end()]).unwrap();
     let mut name = &opcaps["OpCode"];
-    let mut post = None;
-    if name.ends_with("_sat")
+    let mut posts:Vec<String> = Vec::new();
+    // if name.ends_with("_sat")
+    // {
+    //     post = Some("_sat".to_string());
+    //     name = name.trim_end_matches("_sat");
+    // }
+
+    if let Some(postsMatch) = opcaps.name("Posts")
     {
-        post = Some("_sat".to_string());
-        name = name.trim_end_matches("_sat");
+        let pstr = postsMatch.as_str();
+        let splits = pstr.trim_start_matches("_").split("_");
+        for s in splits.into_iter()
+        {
+            posts.push(s.to_string());
+        }
+        println!("{:?}", posts);
     }
     let opcode = OpCode::new(
         name,
-        post,
+        posts,
         match opcaps.name("Dim")
         {
             Some(m) => Some(m.as_str().parse::<u32>().unwrap()),
@@ -728,6 +764,14 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
             let mut varNameDim:Option<u32> = None;
             let mut varDim:Option<u32> = None;
             let mut varSwizzles = "";
+            let mut neg = false;
+            if let Some(negStr) = caps.name("Neg")
+            {
+                if (negStr.as_str() == "-")
+                {
+                    neg = true;
+                }
+            }
             if let Some(m) = caps.name("VarName")
             {
                 varName = m.as_str();
@@ -744,7 +788,7 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
             {
                 varSwizzles = m.as_str();
             };
-            let varOperand = VarOperand::new(varName, varNameDim, varDim, varSwizzles);
+            let varOperand = VarOperand::new(neg,varName, varNameDim, varDim, varSwizzles);
             //println!("{:?}", varOperand);
             start = start + fnd.as_ref().unwrap().end();
             inst.0.push(InstructionComponent::VarOperand(varOperand));
@@ -781,6 +825,7 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
 }
 
 ////////////////////////////////////////// Parser //////////////////////////////////////////
+#[derive(Debug)]
 struct SymbolTable
 {
     pub Symbols: std::collections::HashMap<String, String>,
@@ -818,20 +863,20 @@ struct DXBCParser
 
 impl DXBCParser
 {
-    fn new()->DXBCParser
+    fn new() -> DXBCParser
     {
         DXBCParser
         {
-            Insts:vec![],
+            Insts: vec![],
         }
     }
 
-    fn add(&mut self, inst:Instruction)
+    fn add(&mut self, inst: Instruction)
     {
         self.Insts.push(inst);
     }
 
-    fn parse(&self, symTable:&mut SymbolTable)
+    fn parse(&self, symTable: &mut SymbolTable)
     {
         for it in self.Insts.iter()
         {
@@ -839,163 +884,296 @@ impl DXBCParser
         }
     }
 
-    fn _parse(&self, symTable:&mut SymbolTable, inst:&Instruction) -> bool
+    fn _parse(&self, symTable: &mut SymbolTable, inst: &Instruction) -> bool
     {
         match inst.0.get(0).unwrap()
         {
             InstructionComponent::OpCode(_OpInst) =>
-            {
-                match _OpInst.InstItem
                 {
-                    InstructionItem::Inst_add =>
-                        {
-                            self.parse_2_operands(symTable,inst, "+")
-                        },
-                    InstructionItem::Inst_mul =>
-                        {
-                            self.parse_2_operands(symTable,inst, "*")
-                        },
-                    InstructionItem::Inst_mad =>
-                        {
-                            self.parse_mad(symTable,inst)
-                        },
-                    InstructionItem::Inst_min =>
-                        {
-                            self.parse_min(symTable,inst)
-                        },
-                    InstructionItem::Inst_max =>
-                        {
-                            self.parse_max(symTable,inst)
-                        },
-                    InstructionItem::Inst_itof =>
-                        {
-                            self.parse_itof(symTable,inst)
-                        },
-                    InstructionItem::Inst_mov =>
-                        {
-                            self.parse_mov(symTable,inst)
-                        },
-                    InstructionItem::Inst_loop =>
-                        {
-                            self.parse_loop(symTable,inst)
-                        },
-                    InstructionItem::Inst_dp(i) =>
-                        {
-                            self.parse_dp(symTable,inst)
-                        },
-                    InstructionItem::Inst_exp=>
-                        {
-                            self.parse_exp(symTable,inst)
-                        },
-                    InstructionItem::Inst_rsq=>
-                        {
-                            self.parse_rsq(symTable,inst)
-                        },
-                    InstructionItem::Inst_sqrt=>
-                        {
-                            self.parse_sqrt(symTable,inst)
-                        },
-                    InstructionItem::Inst_sample=>
-                        {
-                            self.parse_sample(symTable,inst)
-                        },
-                    _ =>
-                        {
-                            panic!("unspported instruction {:?}",_OpInst.InstItem );
-                        }
+                    match _OpInst.InstItem
+                    {
+                        InstructionItem::Inst_add =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("{} + {}", operand0, operand1)
+                                    })
+                            },
+                        InstructionItem::Inst_mul =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("{} * {}", operand0, operand1)
+                                    })
+                            },
+                        InstructionItem::Inst_mad =>
+                            {
+                                self.parse_3_operands(symTable, inst, &|operand0: &str, operand1: &str, operand2: &str| -> String
+                                    {
+                                        format!("{} * {} + {}", operand0, operand1, operand2)
+                                    })
+                            },
+                        InstructionItem::Inst_and =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("{} & {}", operand0, operand1)
+                                    })
+                            },
+                        InstructionItem::Inst_min =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("min( {} , {} )", operand0, operand1)
+                                    })
+                            },
+                        InstructionItem::Inst_max =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("max( {} , {} )", operand0, operand1)
+                                    })
+                            },
+                        InstructionItem::Inst_itof =>
+                            {
+                                self.parse_itof(symTable, inst)
+                            },
+                        InstructionItem::Inst_mov =>
+                            {
+                                self.parse_1_operand(symTable, inst, &|operand0: &str| -> String
+                                    {
+                                        format!("{}", operand0)
+                                    })
+                            },
+                        InstructionItem::Inst_movc =>
+                            {
+                                self.parse_3_operands(symTable, inst, &|operand0: &str, operand1: &str,operand2: &str| -> String
+                                    {
+                                        format!("{} ? {} : {}", operand0, operand1, operand2)
+                                    })
+                            },
+                        InstructionItem::Inst_lt =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("{} < {}", operand0, operand1)
+                                    })
+                            },
+                        InstructionItem::Inst_ne =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("{} != {}", operand0, operand1)
+                                    })
+                            },
+                        InstructionItem::Inst_div =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("{} / {}", operand0, operand1)
+                                    })
+                            },
+                        InstructionItem::Inst_loop =>
+                            {
+                                self.parse_loop(symTable, inst)
+                            },
+                        InstructionItem::Inst_dp(i) =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("dot( {} , {} )", operand0, operand1)
+                                    })
+                            },
+                        InstructionItem::Inst_exp =>
+                            {
+                                self.parse_1_operand(symTable, inst, &|operand0: &str| -> String
+                                    {
+                                        format!("exp( {} )", operand0)
+                                    })
+                            },
+                        InstructionItem::Inst_rsq =>
+                            {
+                                self.parse_1_operand(symTable, inst, &|operand0: &str| -> String
+                                    {
+                                        format!("1.0 / sqrt( {} )", operand0)
+                                    })
+                            },
+                        InstructionItem::Inst_sqrt =>
+                            {
+                                self.parse_1_operand(symTable, inst, &|operand0: &str| -> String
+                                    {
+                                        format!("sqrt( {} )", operand0)
+                                    })
+                            },
+                        InstructionItem::Inst_sample =>
+                            {
+                                self.parse_3_operands(symTable, inst, &|operand0: &str,operand1: &str,operand2: &str| -> String
+                                    {
+                                        format!("sample( {} , {} )", operand0,operand1)
+                                    })
+                            },
+                        _ =>
+                            {
+                                panic!("unspported instruction {:?}", _OpInst.InstItem);
+                            }
+                    }
                 }
-            }
             _ => { false }
         }
     }
-    fn parse_exp(&self, symTable:&mut SymbolTable, inst:&Instruction)->bool
+
+    fn parse_sample(&self, symTable: &mut SymbolTable, inst: &Instruction) -> bool
+    {
+        return true;
+    }
+
+    fn parse_loop(&self, symTable: &mut SymbolTable, inst: &Instruction) -> bool
+    {
+        return true;
+    }
+
+    fn parse_itof(&self, symTable: &mut SymbolTable, inst: &Instruction) -> bool
+    {
+        return true;
+    }
+
+    fn parse_1_operand(&self, symTable: &mut SymbolTable, inst: &Instruction, astFunc: &dyn Fn(&str) -> String) -> bool
     {
         if inst.0.len() != 3
         {
-            println!("{:?}", &inst);
+            println!("operand count not correct. Requires 3 got {} {:?}", inst.0.len(), &inst);
             return false;
         }
         let mut output = "".to_string();
-        let  (hasSat, dim) = self.get_opcode(symTable,inst.0.get(0).unwrap());
-        let (mut output, mut mask) = self.get_dest(symTable,inst.0.get(1).unwrap());
+        let (hasSat, dim) = self.get_opcode(symTable, inst.0.get(0).unwrap());
+        let (mut output, mut mask) = self.get_dest(symTable, inst.0.get(1).unwrap());
 
         let mut exprPart = "".to_string();
-        exprPart.push_str(&self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(2).unwrap()));
+        exprPart.push_str(&astFunc(&self.get_operand_output(symTable, mask.as_ref().unwrap(), inst.0.get(2).unwrap())));
 
         if hasSat
         {
-            println!("{} saturate( exp( {} ) )", output, exprPart);
-        }
-        else
-        {
-            println!("{} exp( {} )",output,exprPart );
+            println!("{} saturate( {} )", output, exprPart);
+        } else {
+            println!("{} {}", output, exprPart);
         }
         return true;
     }
-    fn parse_2_operands(&self, symTable:&mut SymbolTable,inst:&Instruction, operator:&str)->bool
+
+    fn parse_2_operands(&self, symTable: &mut SymbolTable, inst: &Instruction, astFunc: &dyn Fn(&str, &str) -> String) -> bool
     {
         if inst.0.len() != 4
         {
-            println!("{:?}", &inst);
+            println!("operand count not correct. Requires 4 got {} {:?}", inst.0.len(), &inst);
             return false;
         }
 
         let mut output = "".to_string();
-        let  (hasSat, dim) = self.get_opcode(symTable,inst.0.get(0).unwrap());
-        let (mut output, mut mask) = self.get_dest(symTable,inst.0.get(1).unwrap());
+        let (hasSat, dim) = self.get_opcode(symTable, inst.0.get(0).unwrap());
+        let (mut output, mut mask) = self.get_dest(symTable, inst.0.get(1).unwrap());
 
         let mut exprPart = "".to_string();
-        exprPart.push_str(&self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(2).unwrap()));
-        exprPart.push_str(&format!(" {} ",operator));
-        exprPart.push_str(&self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(3).unwrap()));
+
+        exprPart.push_str(&astFunc(
+            &self.get_operand_output(symTable, mask.as_ref().unwrap(), inst.0.get(2).unwrap()),
+            &self.get_operand_output(symTable, mask.as_ref().unwrap(), inst.0.get(3).unwrap())
+        )
+        );
 
         if hasSat
         {
             println!("{} saturate( {} )", output, exprPart);
-        }
-        else
-        {
-            println!("{} {}",output,exprPart );
+        } else {
+            println!("{} {}", output, exprPart);
         }
         return true;
     }
 
-    fn parse_sample(&self, symTable:&mut SymbolTable,inst:&Instruction)->bool
+    fn parse_3_operands(&self, symTable: &mut SymbolTable, inst: &Instruction, astFunc: &dyn Fn(&str, &str, &str) -> String) -> bool
     {
-        return true;
-    }
-
-    fn parse_mov(&self, symTable:&mut SymbolTable,inst:&Instruction)-> bool
-    {
-        if inst.0.len() != 3
+        if inst.0.len() != 5
         {
-            println!("{:?}", &inst);
+            println!("operand count not correct. Requires 5 got {} {:?}", inst.0.len(), &inst);
             return false;
         }
+
         let mut output = "".to_string();
-        let  (hasSat, dim) = self.get_opcode(symTable,inst.0.get(0).unwrap());
-        let (mut output, mut mask) = self.get_dest(symTable,inst.0.get(1).unwrap());
+        let (hasSat, dim) = self.get_opcode(symTable, inst.0.get(0).unwrap());
+        let (mut output, mut mask) = self.get_dest(symTable, inst.0.get(1).unwrap());
 
         let mut exprPart = "".to_string();
-        exprPart.push_str(&self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(2).unwrap()));
+
+        exprPart.push_str(&astFunc(
+            &self.get_operand_output(symTable, mask.as_ref().unwrap(), inst.0.get(2).unwrap()),
+            &self.get_operand_output(symTable, mask.as_ref().unwrap(), inst.0.get(3).unwrap()),
+            &self.get_operand_output(symTable, mask.as_ref().unwrap(), inst.0.get(4).unwrap())
+        )
+        );
 
         if hasSat
         {
             println!("{} saturate( {} )", output, exprPart);
-        }
-        else
-        {
-            println!("{} {}",output,exprPart );
+        } else {
+            println!("{} {}", output, exprPart);
         }
         return true;
     }
 
-    fn parse_loop(&self, symTable:&mut SymbolTable,inst:&Instruction)-> bool
+    fn get_opcode(&self, symTable: &mut SymbolTable, inst: &InstructionComponent) -> (bool, Option<u32>)
     {
-        return true;
+        let mut hasSat = false;
+        let mut dim = None;
+        if let InstructionComponent::OpCode(opcode) = inst
+        {
+            if (opcode.Posts.len() > 0)
+            {
+                hasSat = true;
+            }
+            if (opcode.Dim.is_some())
+            {
+                dim = opcode.Dim.clone();
+            }
+        };
+        (hasSat, dim)
     }
 
-    fn get_operand_output(&self, symTable:&mut SymbolTable,mask:&SwizzlesMask, inst:&InstructionComponent)->String
+    fn get_dest(&self, symTable: &mut SymbolTable, inst: &InstructionComponent) -> (String, Option<SwizzlesMask>)
+    {
+        let mut mask: Option<SwizzlesMask>;
+        let mut output = "".to_string();
+        if let InstructionComponent::VarOperand(var) = inst
+        {
+            mask = Some(var.Swizzles.clone());
+            let mut varName = var.var_name();
+            let mut symName = symTable.get_symbol(&varName);
+            // output attribute dont use local symbol name
+            if varName.starts_with("o")
+            {
+                if symName.starts_with("local")
+                {
+                    varName = varName.replace("o", "_OUT.");
+                    symName = &varName;
+                } else {
+                    varName = format!("_OUT.{}", &symName);
+                    symName = &varName;
+                }
+            }
+            output.push_str(&format!("{}{} = ", symName, &var.dim_swizzle_name()));
+        } else {
+            panic!();
+        }
+
+        let allMask = SwizzlesMask::all_mask();
+        if mask.is_none()
+        {
+            mask = Some(allMask);
+        }
+
+        (output, mask)
+    }
+
+
+    fn get_operand_output(&self, symTable: &mut SymbolTable, mask: &SwizzlesMask, inst: &InstructionComponent) -> String
     {
         let mut output = "".to_string();
         if let InstructionComponent::VarOperand(var) = inst
@@ -1012,227 +1190,40 @@ impl DXBCParser
             // Input attribute dont use local symbol name
             if varName.starts_with("v")
             {
-                varName = varName.replace("v", "_IN.");
-                symName = &varName;
+                if symName.starts_with("local")
+                {
+                    varName = varName.replace("v", "_IN.");
+                    symName = &varName;
+                } else {
+                    varName = format!("_IN.{}", &symName);
+                    symName = &varName;
+                }
             }
 
             // output attribute dont use local symbol name
             if varName.starts_with("o")
             {
-                varName = varName.replace("o", "_OUT.");
+                if symName.starts_with("local")
+                {
+                    varName = varName.replace("o", "_OUT.");
+                    symName = &varName;
+                } else {
+                    varName = format!("_OUT.{}", &symName);
+                    symName = &varName;
+                }
+            }
+            if var.IsTexture
+            {
+                varName = var.var_name();
                 symName = &varName;
             }
 
-            output.push_str(&format!("{}{}.{}", symName, &var.dim_name(), outputMask.to_string()));
-        }
-        else if let  InstructionComponent::ConstantOperand(constant) = inst
+            output.push_str(&format!("{}{}{}.{}", if var.Neg {"-"} else {""}, symName, &var.dim_name(), outputMask.to_string()));
+        } else if let InstructionComponent::ConstantOperand(constant) = inst
         {
-            output.push_str(&format!("{}",constant.output(mask)));
+            output.push_str(&format!("{}", constant.output(mask)));
         }
         return output;
-    }
-
-    fn parse_mad(&self, symTable:&mut SymbolTable,inst:&Instruction)-> bool
-    {
-        if inst.0.len() != 5
-        {
-            println!("{:?}", &inst);
-            return false;
-        }
-
-        let mut output = "".to_string();
-        let  (hasSat, dim) = self.get_opcode(symTable,inst.0.get(0).unwrap());
-        let (mut output, mut mask) = self.get_dest(symTable,inst.0.get(1).unwrap());
-
-        let mut exprPart = "".to_string();
-        exprPart.push_str(&self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(2).unwrap()));
-        exprPart.push_str(" * ");
-        exprPart.push_str(&self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(3).unwrap()));
-        exprPart.push_str(" + ");
-        exprPart.push_str(&self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(4).unwrap()));
-
-        if hasSat
-        {
-            println!("{} saturate( {} )", output, exprPart);
-        }
-        else
-        {
-            println!("{} {}",output,exprPart );
-        }
-        return true;
-    }
-
-    fn parse_mul(&self, symTable:&mut SymbolTable,inst:&Instruction) -> bool
-    {
-        return true;
-    }
-
-    fn parse_min(&self, symTable:&mut SymbolTable,inst:&Instruction)-> bool
-    {
-        return true;
-    }
-    fn parse_max(&self, symTable:&mut SymbolTable,inst:&Instruction)-> bool
-    {
-        return true;
-    }
-    fn parse_itof(&self, symTable:&mut SymbolTable,inst:&Instruction)-> bool
-    {
-        return true;
-    }
-
-    fn get_opcode(&self, symTable:&mut SymbolTable,inst:&InstructionComponent)->(bool, Option<u32>)
-    {
-        let mut hasSat = false;
-        let mut dim = None;
-        if let InstructionComponent::OpCode(opcode) = inst
-        {
-            if (opcode.Post.is_some())
-            {
-                hasSat = true;
-            }
-            if (opcode.Dim.is_some())
-            {
-                dim = opcode.Dim.clone();
-            }
-        };
-        (hasSat, dim)
-    }
-
-    fn get_dest(&self, symTable:&mut SymbolTable,inst:&InstructionComponent)->(String, Option<SwizzlesMask>)
-    {
-        let mut mask:Option<SwizzlesMask>;
-        let mut output = "".to_string();
-        if let InstructionComponent::VarOperand(var) = inst
-        {
-            mask = Some(var.Swizzles.clone());
-            let mut varName = var.var_name();
-            let mut symName = symTable.get_symbol(&varName);
-            // output attribute dont use local symbol name
-            if varName.starts_with("o")
-            {
-                varName = varName.replace("o", "_OUT.");
-                symName = &varName;
-            }
-            output.push_str(&format!("{}{} = ", symName, &var.dim_swizzle_name()));
-        }
-        else
-        {
-            panic!();
-        }
-
-        let allMask = SwizzlesMask::all_mask();
-        if mask.is_none()
-        {
-            mask = Some(allMask);
-        }
-
-        (output, mask)
-    }
-
-    fn parse_dp(&self, symTable:&mut SymbolTable,inst:&Instruction)->bool
-    {
-        if inst.0.len() != 4
-        {
-            println!("{:?}", &inst);
-            return false;
-        }
-
-        let mut output = "".to_string();
-        let  (hasSat, dim) = self.get_opcode(symTable,inst.0.get(0).unwrap());
-        let (mut output, mut mask) = self.get_dest(symTable,inst.0.get(1).unwrap());
-
-        if dim.is_some()
-        {
-            let dd = dim.unwrap();
-            mask = Some(SwizzlesMask::n_mask(dd as i32));
-        }
-
-        let mut exprPart = "".to_string();
-        exprPart.push_str(&format!(
-            "dot( {}, {} )",
-            &self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(2).unwrap()),
-            &self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(3).unwrap())
-        ));
-
-        if hasSat
-        {
-            println!("{} saturate( {} )", output, exprPart);
-        }
-        else
-        {
-            println!("{} {}",output,exprPart );
-        }
-        return true;
-    }
-
-    fn parse_rsq(&self, symTable:&mut SymbolTable,inst:&Instruction)->bool
-    {
-        if inst.0.len() != 3
-        {
-            println!("{:?}", &inst);
-            return false;
-        }
-
-        let mut output = "".to_string();
-        let  (hasSat, dim) = self.get_opcode(symTable,inst.0.get(0).unwrap());
-        let (mut output, mut mask) = self.get_dest(symTable,inst.0.get(1).unwrap());
-
-        if dim.is_some()
-        {
-            let dd = dim.unwrap();
-            mask = Some(SwizzlesMask::n_mask(dd as i32));
-        }
-
-        let mut exprPart = "".to_string();
-        exprPart.push_str(&format!(
-            "1.0  / sqrt( {} )",
-            &self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(2).unwrap())
-        ));
-
-        if hasSat
-        {
-            println!("{} saturate( {} )", output, exprPart);
-        }
-        else
-        {
-            println!("{} {}",output,exprPart );
-        }
-        return true;
-    }
-
-    fn parse_sqrt(&self, symTable:&mut SymbolTable,inst:&Instruction)->bool
-    {
-        if inst.0.len() != 3
-        {
-            println!("{:?}", &inst);
-            return false;
-        }
-
-        let mut output = "".to_string();
-        let  (hasSat, dim) = self.get_opcode(symTable,inst.0.get(0).unwrap());
-        let (mut output, mut mask) = self.get_dest(symTable,inst.0.get(1).unwrap());
-
-        if dim.is_some()
-        {
-            let dd = dim.unwrap();
-            mask = Some(SwizzlesMask::n_mask(dd as i32));
-        }
-
-        let mut exprPart = "".to_string();
-        exprPart.push_str(&format!(
-            "sqrt({})",
-            &self.get_operand_output(symTable,mask.as_ref().unwrap(), inst.0.get(2).unwrap())
-        ));
-
-        if hasSat
-        {
-            println!("{} saturate( {} )", output, exprPart);
-        }
-        else
-        {
-            println!("{} {}",output,exprPart );
-        }
-        return true;
     }
 }
 
@@ -1247,7 +1238,76 @@ fn main()
     println!("{}",std::env::current_exe().unwrap().to_str().unwrap());
 
     let args :std::vec::Vec<std::string::String>= env::args().into_iter().map(|c|{c}).collect();
-    let inputFile = &args[1];
+    let mut symTable = SymbolTable::new();
+
+    if args.len() > 2
+    {
+        let mut opts = "".to_string();
+        for i in 1..args.len()-1
+        {
+            opts.push_str(" ");
+            opts.push_str(&args[i]);
+        }
+
+        let definePattern = Regex::new(
+            r#"(?x)
+                [\t\ ]*
+                (?:
+                    IN
+                        [\t\ ]*
+                        =
+                        [\t\ ]*
+                        \{
+                            (
+                                (?:
+                                    [\t\ ]*
+                                    [A-Za-z_0-9]+
+                                    [\t\ ]*
+                                )*
+                            )
+                        \}
+                )?
+                (?:
+                    OUT
+                        [\t\ ]*
+                        =
+                        [\t\ ]*
+                        \{
+                            (
+                                (?:
+                                    [\t\ ]*
+                                    [A-Za-z_0-9]+
+                                    [\t\ ]*
+                                )*
+                            )
+                        \}
+                )?
+            "#).unwrap();
+
+        for it in definePattern.captures_iter(&opts)
+        {
+            if it.get(1).is_some()
+            {
+                let inDefine = it.get(1).as_ref().unwrap().as_str();
+                let splits :Vec<&str>= inDefine.trim().split(" ").into_iter().collect();
+                for i in 0..splits.len()
+                {
+                    symTable.Symbols.insert(format!("v{}", i), splits[i].trim().to_string());
+                }
+            }
+            if it.get(2).is_some()
+            {
+                let inDefine = it.get(2).as_ref().unwrap().as_str();
+                let splits :Vec<&str>= inDefine.trim().split(" ").into_iter().collect();
+                for i in 0..splits.len()
+                {
+                    symTable.Symbols.insert(format!("o{}", i), splits[i].trim().to_string());
+                }
+            }
+        }
+        println!("{:?}",symTable);
+    }
+    let inputFile = &args[args.len()-1];
 
     //println!("Hello, world {:?}!",inputFile);
     let f = std::fs::OpenOptions::new().read(true).open(inputFile);
@@ -1259,7 +1319,6 @@ fn main()
     let f = f.unwrap();
 
     let mut parser = DXBCParser::new();
-    let mut symTable = SymbolTable::new();
     for l in std::io::BufReader::new(f).lines()
     {
         let line = l.as_ref().unwrap().as_str().trim();
