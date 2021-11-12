@@ -14,6 +14,7 @@ use std::ops::Index;
 use std::str::FromStr;
 use std::vec::Vec;
 use regex::{Match, Regex, RegexBuilder};
+use crate::Swizzle::z;
 
 ////////////////////////////////////////////// Some Definitions /////////////////////////////////
 #[derive(Debug)]
@@ -28,6 +29,10 @@ enum InstructionItem
     Inst_min,
     Inst_max,
     Inst_mov,
+    Inst_movc,
+    Inst_lt,
+    Inst_ne,
+    Inst_div,
     Inst_mad,
     Inst_mul,
     Inst_exp,
@@ -49,13 +54,17 @@ impl core::str::FromStr for InstructionItem
         {
             "dp"    => {Ok(InstructionItem::Inst_dp(0))},
             "add"   => {Ok(InstructionItem::Inst_add)},
-            "and"   => {Ok(InstructionItem::Inst_break)},
+            "and"   => {Ok(InstructionItem::Inst_and)},
             "break" => {Ok(InstructionItem::Inst_break)},
             "itof"  => {Ok(InstructionItem::Inst_itof)},
             "loop"  => {Ok(InstructionItem::Inst_loop)},
             "min"   => {Ok(InstructionItem::Inst_min)},
             "max"   => {Ok(InstructionItem::Inst_max)},
             "mov"   => {Ok(InstructionItem::Inst_mov)},
+            "movc"   => {Ok(InstructionItem::Inst_movc)},
+            "lt"   => {Ok(InstructionItem::Inst_lt)},
+            "div"   => {Ok(InstructionItem::Inst_div)},
+            "ne"   => {Ok(InstructionItem::Inst_ne)},
             "mad"   => {Ok(InstructionItem::Inst_mad)},
             "mul"   => {Ok(InstructionItem::Inst_mul)},
             "exp"   => {Ok(InstructionItem::Inst_exp)},
@@ -204,7 +213,9 @@ struct VarOperand
     pub Name:       std::string::String,
     pub NameDim:    Option<u32>,
     pub Dim:        Option<u32>,
-    pub Swizzles:   SwizzlesMask
+    pub Swizzles:   SwizzlesMask,
+    pub IsSampler:  bool,
+    pub IsTexture:  bool,
 }
 
 impl  core::str::FromStr for SwizzlesMask
@@ -274,7 +285,9 @@ impl VarOperand
             Name        : name.to_string(),
             NameDim     : nameDim,
             Dim         : dim,
-            Swizzles    : swizzles.parse::<SwizzlesMask>().unwrap()
+            Swizzles    : swizzles.parse::<SwizzlesMask>().unwrap(),
+            IsSampler   : if name == "s" && nameDim.is_some() && swizzles=="" {true} else {false},
+            IsTexture   : if name == "t" && nameDim.is_some() {true} else {false}
         }
     }
 
@@ -336,6 +349,10 @@ impl VarOperand
     fn get_swizzles(&self, mask:&SwizzlesMask)->SwizzlesMask
     {
         //println!("{:?}", mask);
+        if self.IsSampler
+        {
+            return self.Swizzles.clone();
+        }
         if mask.get_effective_len() == 1
         {
             return self.Swizzles.clone();
@@ -550,9 +567,10 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
                             )?
                         )
                         |
-                        ([\|]
+                        ([-]?
+                            [\|]
                                 (                               #
-                                    [-]?[_A-Za-z]+[0-9]*       # operand name
+                                    [_A-Za-z]+[0-9]*       # operand name
                                     (?:
                                         \[[0-9]+\]              # dim
                                     )?
@@ -561,7 +579,8 @@ fn DXBCLexer(inputline:&str)->Option<Instruction>
                                         [xyzw]{1,5}             # xyzw
                                     )
                                 )
-                        [\|])
+                            [\|]
+                        )
                         |
                         (
                             [-]?[_A-Za-z]+[0-9]*               # constant operand name
@@ -895,6 +914,14 @@ impl DXBCParser
                                         format!("{} * {} + {}", operand0, operand1, operand2)
                                     })
                             },
+                        InstructionItem::Inst_and =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        //reverse order
+                                        format!("(uint){} & (uint){}", operand1, operand0)
+                                    })
+                            },
                         InstructionItem::Inst_min =>
                             {
                                 self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
@@ -918,6 +945,35 @@ impl DXBCParser
                                 self.parse_1_operand(symTable, inst, &|operand0: &str| -> String
                                     {
                                         format!("{}", operand0)
+                                    })
+                            },
+                        InstructionItem::Inst_movc =>
+                            {
+                                self.parse_3_operands(symTable, inst, &|operand0: &str, operand1: &str,operand2: &str| -> String
+                                    {
+                                        format!("{} ? {} : {}", operand0, operand1, operand2)
+                                    })
+                            },
+                        InstructionItem::Inst_lt =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("{} < {}", operand0,operand1)
+                                    })
+                            },
+                        InstructionItem::Inst_ne =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        // reverse order
+                                        format!("{} != {}", operand1,operand0)
+                                    })
+                            },
+                        InstructionItem::Inst_div =>
+                            {
+                                self.parse_2_operands(symTable, inst, &|operand0: &str, operand1: &str| -> String
+                                    {
+                                        format!("{} / {}", operand0, operand1)
                                     })
                             },
                         InstructionItem::Inst_loop =>
@@ -954,7 +1010,10 @@ impl DXBCParser
                             },
                         InstructionItem::Inst_sample =>
                             {
-                                self.parse_sample(symTable, inst)
+                                self.parse_3_operands(symTable, inst, &|operand0: &str,operand1: &str,operand2: &str| -> String
+                                    {
+                                        format!("sample( {} , {} )", operand0,operand1)
+                                    })
                             },
                         _ =>
                             {
@@ -985,7 +1044,7 @@ impl DXBCParser
     {
         if inst.0.len() != 3
         {
-            println!("{:?}", &inst);
+            println!("operand count not correct. Requires 3 got {} {:?}", inst.0.len(), &inst);
             return false;
         }
         let mut output = "".to_string();
@@ -997,9 +1056,9 @@ impl DXBCParser
 
         if hasSat
         {
-            println!("{} saturate( {} )", output, exprPart);
+            println!("{} saturate( {} );", output, exprPart);
         } else {
-            println!("{} {}", output, exprPart);
+            println!("{} {};", output, exprPart);
         }
         return true;
     }
@@ -1008,7 +1067,7 @@ impl DXBCParser
     {
         if inst.0.len() != 4
         {
-            println!("{:?}", &inst);
+            println!("operand count not correct. Requires 4 got {} {:?}", inst.0.len(), &inst);
             return false;
         }
 
@@ -1026,9 +1085,9 @@ impl DXBCParser
 
         if hasSat
         {
-            println!("{} saturate( {} )", output, exprPart);
+            println!("{} saturate( {} );", output, exprPart);
         } else {
-            println!("{} {}", output, exprPart);
+            println!("{} {};", output, exprPart);
         }
         return true;
     }
@@ -1037,7 +1096,7 @@ impl DXBCParser
     {
         if inst.0.len() != 5
         {
-            println!("{:?}", &inst);
+            println!("operand count not correct. Requires 5 got {} {:?}", inst.0.len(), &inst);
             return false;
         }
 
@@ -1056,9 +1115,9 @@ impl DXBCParser
 
         if hasSat
         {
-            println!("{} saturate( {} )", output, exprPart);
+            println!("{} saturate( {} );", output, exprPart);
         } else {
-            println!("{} {}", output, exprPart);
+            println!("{} {};", output, exprPart);
         }
         return true;
     }
@@ -1155,6 +1214,11 @@ impl DXBCParser
                     varName = format!("_OUT.{}", &symName);
                     symName = &varName;
                 }
+            }
+            if var.IsTexture
+            {
+                varName = var.var_name();
+                symName = &varName;
             }
 
             output.push_str(&format!("{}{}{}.{}", if var.Neg {"-"} else {""}, symName, &var.dim_name(), outputMask.to_string()));
